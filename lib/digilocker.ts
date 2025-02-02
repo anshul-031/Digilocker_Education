@@ -7,17 +7,27 @@ class DigilockerService {
 
   constructor(config: DigilockerConfig) {
     this.config = config;
+    console.log('DigilockerService initialized with config:', {
+      clientId: this.config.clientId,
+      redirectUri: this.config.redirectUri,
+      authEndpoint: this.config.authEndpoint,
+      apiEndpoint: this.config.apiEndpoint
+    });
   }
 
   private generateCodeVerifier(): string {
-    return crypto.randomBytes(32)
+    console.log('Generating code verifier...');
+    const verifier = crypto.randomBytes(32)
       .toString('base64')
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=/g, '');
+    console.log('Generated code verifier:', verifier);
+    return verifier;
   }
 
   private async generateCodeChallenge(verifier: string): Promise<string> {
+    console.log('Generating code challenge for verifier:', verifier);
     const encoder = new TextEncoder();
     const data = encoder.encode(verifier);
     const hash = await crypto.subtle.digest('SHA-256', data);
@@ -26,13 +36,17 @@ class DigilockerService {
     const hashString = hashArray.map(byte => String.fromCharCode(byte)).join('');
     const base64 = btoa(hashString);
     
-    return base64
+    const challenge = base64
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=/g, '');
+    
+    console.log('Generated code challenge:', challenge);
+    return challenge;
   }
 
   async getAuthUrl(): Promise<{ url: string; codeVerifier: string }> {
+    console.log('Generating authorization URL...');
     const codeVerifier = this.generateCodeVerifier();
     const codeChallenge = await this.generateCodeChallenge(codeVerifier);
 
@@ -46,14 +60,17 @@ class DigilockerService {
       scope: 'avs_parent'
     });
 
-    return {
-      url: `${this.config.authEndpoint}?${params.toString()}`,
-      codeVerifier
-    };
+    const url = `${this.config.authEndpoint}?${params.toString()}`;
+    console.log('Generated authorization URL:', url);
+    
+    return { url, codeVerifier };
   }
 
   async exchangeCode(code: string, codeVerifier: string): Promise<DigilockerToken> {
-    // Use the base API endpoint for token exchange
+    console.log('Starting code exchange process...');
+    console.log('Authorization code:', code);
+    console.log('Code verifier:', codeVerifier);
+
     const tokenEndpoint = 'https://api.digitallocker.gov.in/public/oauth2/1/token';
     const params = new URLSearchParams({
       code,
@@ -67,7 +84,12 @@ class DigilockerService {
     try {
       console.log('Token exchange request:', {
         url: tokenEndpoint,
-        params: Object.fromEntries(params),
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+        },
+        params: Object.fromEntries(params)
       });
 
       const response = await fetch(tokenEndpoint, {
@@ -79,7 +101,12 @@ class DigilockerService {
         body: params.toString()
       });
 
-      console.log('Token exchange response status:', response.status);
+      console.log('Token exchange response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers)
+      });
+
       const responseText = await response.text();
       console.log('Token exchange response body:', responseText);
 
@@ -90,11 +117,18 @@ class DigilockerService {
       let token;
       try {
         token = JSON.parse(responseText);
+        console.log('Parsed token response:', {
+          ...token,
+          access_token: token.access_token ? '***' : undefined,
+          refresh_token: token.refresh_token ? '***' : undefined
+        });
       } catch (e) {
+        console.error('Failed to parse token response:', e);
         throw new Error(`Invalid JSON response: ${responseText}`);
       }
 
-      if (!token.access_token || !token.token_type || !token.expires_in || !token.refresh_token) {
+      if (!token.access_token || !token.token_type || !token.expires_in) {
+        console.error('Invalid token structure:', token);
         throw new Error('Invalid token response from DigiLocker');
       }
 
@@ -108,37 +142,96 @@ class DigilockerService {
 
   private async fetchDocument(uri: string): Promise<any> {
     if (!this.token) {
+      console.error('Attempted to fetch document without authentication');
       throw new Error('Not authenticated');
     }
 
-    const response = await fetch(`${this.config.apiEndpoint}/pull/${uri}`, {
-      headers: {
-        Authorization: `Bearer ${this.token.access_token}`,
-      },
+    // First, get the list of issued documents
+    const url = 'https://api.digitallocker.gov.in/public/oauth2/1/file/issued';
+    console.log(`Fetching issued documents from: ${url}`);
+    console.log('Request headers:', {
+      Authorization: 'Bearer ***',
+      Accept: 'application/json'
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch document: ${uri}`);
-    }
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.token.access_token}`,
+          'Accept': 'application/json',
+        },
+      });
 
-    return response.json();
+      console.log(`Document fetch response for ${uri}:`, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers)
+      });
+
+      const responseText = await response.text();
+      console.log(`Document fetch response body for ${uri}:`, responseText);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch document ${uri}: ${response.status} - ${responseText}`);
+      }
+
+      try {
+        const parsedResponse = JSON.parse(responseText);
+        console.log(`Parsed response for ${uri}:`, parsedResponse);
+        
+        // Find the specific document in the issued documents list
+        const documents = parsedResponse.items || [];
+        const document = documents.find((doc: any) => doc.uri === uri || doc.doctype === uri);
+        
+        if (!document) {
+          throw new Error(`Document not found: ${uri}`);
+        }
+
+        // Now fetch the specific document details
+        const documentUrl = `https://api.digitallocker.gov.in/public/oauth2/1/xml/${document.uri}`;
+        const documentResponse = await fetch(documentUrl, {
+          headers: {
+            'Authorization': `Bearer ${this.token.access_token}`,
+            'Accept': 'application/json',
+          },
+        });
+
+        const documentText = await documentResponse.text();
+        console.log(`Document details response for ${uri}:`, documentText);
+
+        if (!documentResponse.ok) {
+          throw new Error(`Failed to fetch document details: ${documentResponse.status} - ${documentText}`);
+        }
+
+        return JSON.parse(documentText);
+      } catch (e) {
+        console.error(`Failed to parse response for ${uri}:`, e);
+        throw new Error(`Invalid JSON response for ${uri}: ${responseText}`);
+      }
+    } catch (error) {
+      console.error(`Error fetching document ${uri}:`, error);
+      throw error;
+    }
   }
 
   async getEducationRecords(): Promise<EducationRecord[]> {
+    console.log('Fetching education records...');
     const records: EducationRecord[] = [];
 
     try {
-      const tenth = await this.fetchDocument('cbse/marksheet10');
+      console.log('Attempting to fetch 10th marksheet...');
+      const tenth = await this.fetchDocument('CBSE/MARKS10');
+      console.log('Successfully fetched 10th marksheet:', tenth);
       records.push({
-        id: tenth.docId,
+        id: tenth.docId || tenth.id,
         type: 'Secondary',
-        institution: tenth.school,
+        institution: tenth.school || tenth.institution,
         board: 'CBSE',
-        yearOfPassing: parseInt(tenth.yearOfPassing),
-        percentage: parseFloat(tenth.percentage),
-        rollNumber: tenth.rollNumber,
-        certificateNumber: tenth.certificateNumber,
-        subjects: tenth.subjects.map((s: any) => s.name),
+        yearOfPassing: parseInt(tenth.yearOfPassing || tenth.year),
+        percentage: parseFloat(tenth.percentage || tenth.marks),
+        rollNumber: tenth.rollNumber || tenth.roll,
+        certificateNumber: tenth.certificateNumber || tenth.certificate,
+        subjects: Array.isArray(tenth.subjects) ? tenth.subjects.map((s: any) => s.name || s) : [],
         status: 'Completed'
       });
     } catch (error) {
@@ -146,46 +239,83 @@ class DigilockerService {
     }
 
     try {
-      const twelfth = await this.fetchDocument('cbse/marksheet12');
+      console.log('Attempting to fetch 12th marksheet...');
+      const twelfth = await this.fetchDocument('CBSE/MARKS12');
+      console.log('Successfully fetched 12th marksheet:', twelfth);
       records.push({
-        id: twelfth.docId,
+        id: twelfth.docId || twelfth.id,
         type: 'HigherSecondary',
-        institution: twelfth.school,
+        institution: twelfth.school || twelfth.institution,
         board: 'CBSE',
-        yearOfPassing: parseInt(twelfth.yearOfPassing),
-        percentage: parseFloat(twelfth.percentage),
-        rollNumber: twelfth.rollNumber,
-        certificateNumber: twelfth.certificateNumber,
-        subjects: twelfth.subjects.map((s: any) => s.name),
+        yearOfPassing: parseInt(twelfth.yearOfPassing || twelfth.year),
+        percentage: parseFloat(twelfth.percentage || twelfth.marks),
+        rollNumber: twelfth.rollNumber || twelfth.roll,
+        certificateNumber: twelfth.certificateNumber || twelfth.certificate,
+        subjects: Array.isArray(twelfth.subjects) ? twelfth.subjects.map((s: any) => s.name || s) : [],
         status: 'Completed'
       });
     } catch (error) {
       console.error('Error fetching 12th marksheet:', error);
     }
 
+    if (records.length === 0) {
+      console.error('No education records found');
+      throw new Error('No education records found');
+    }
+
+    console.log('Successfully fetched education records:', records);
     return records;
   }
 
   async getUserProfile(): Promise<Partial<Person>> {
     if (!this.token) {
+      console.error('Attempted to fetch user profile without authentication');
       throw new Error('Not authenticated');
     }
 
-    const response = await fetch(`${this.config.apiEndpoint}/user`, {
-      headers: {
-        Authorization: `Bearer ${this.token.access_token}`,
-      },
+    const url = 'https://api.digitallocker.gov.in/public/oauth2/1/user';
+    console.log('Fetching user profile from:', url);
+    console.log('Request headers:', {
+      Authorization: 'Bearer ***',
+      Accept: 'application/json'
     });
 
-    if (!response.ok) {
-      throw new Error('Failed to fetch user profile');
-    }
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.token.access_token}`,
+          'Accept': 'application/json',
+        },
+      });
 
-    const data = await response.json();
-    return {
-      name: data.name,
-      dateOfBirth: data.dob,
-    };
+      console.log('User profile response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers)
+      });
+
+      const responseText = await response.text();
+      console.log('User profile response body:', responseText);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user profile: ${response.status} - ${responseText}`);
+      }
+
+      try {
+        const data = JSON.parse(responseText);
+        console.log('Parsed user profile:', data);
+        return {
+          name: data.name || data.full_name,
+          dateOfBirth: data.dob || data.birth_date,
+        };
+      } catch (e) {
+        console.error('Failed to parse user profile response:', e);
+        throw new Error(`Invalid JSON response for user profile: ${responseText}`);
+      }
+    } catch (error) {
+      console.error('Error fetching user profile:', error);
+      throw error;
+    }
   }
 }
 
