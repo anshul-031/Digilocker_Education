@@ -53,8 +53,8 @@ class DigilockerService {
   }
 
   async exchangeCode(code: string, codeVerifier: string): Promise<DigilockerToken> {
-    // The token endpoint should be at /oauth2/1/token instead of /oauth2/token
-    const tokenEndpoint = `${this.config.apiEndpoint}/oauth2/1/token`;
+    // Use the base API endpoint for token exchange
+    const tokenEndpoint = 'https://api.digitallocker.gov.in/public/oauth2/1/token';
     const params = new URLSearchParams({
       code,
       grant_type: 'authorization_code',
@@ -64,38 +64,43 @@ class DigilockerService {
       code_verifier: codeVerifier
     });
 
-    console.log("Anshul3");
     try {
-      console.log("Anshul1");
+      console.log('Token exchange request:', {
+        url: tokenEndpoint,
+        params: Object.fromEntries(params),
+      });
+
       const response = await fetch(tokenEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
         },
-        body: params
+        body: params.toString()
       });
-      console.log("Anshul2");
-      
+
+      console.log('Token exchange response status:', response.status);
+      const responseText = await response.text();
+      console.log('Token exchange response body:', responseText);
+
       if (!response.ok) {
-        const errorData = await response.text();
-        console.error('Token exchange error:', {
-          status: response.status,
-          statusText: response.statusText,
-          error: errorData
-        });
-        throw new Error(`Token exchange failed: ${response.status} - ${errorData}`);
+        throw new Error(`Token exchange failed: ${response.status} - ${responseText}`);
       }
-      
-      const token = await response.json();
-      
+
+      let token;
+      try {
+        token = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Invalid JSON response: ${responseText}`);
+      }
+
       if (!token.access_token || !token.token_type || !token.expires_in || !token.refresh_token) {
         throw new Error('Invalid token response from DigiLocker');
       }
-      
+
       this.token = token;
       return token;
     } catch (error) {
-      console.log("Anshul4");
       console.error('Token exchange error:', error);
       throw error instanceof Error ? error : new Error('Failed to exchange code for token');
     }
